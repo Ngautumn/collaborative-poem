@@ -6,54 +6,155 @@ let metersSmooth = {dx:0,dy:0};
 const SCALE = 0.9;
 
 let watchId = null;
+let controlsBound = false;
+let gameStarted = false;
+let isHost = false;
+let selectedHostSeat = null;
+let sceneTheme = {
+  bg: "#0b0f14",
+  grid: "#505050",
+  text: "#ffffff",
+  triangle: "#508cff"
+};
 
 // HUD  HUD retch
 const statusEl = () => document.getElementById("status");
 const accEl = () => document.getElementById("acc");
 const coordEl = () => document.getElementById("coord");
 const metersEl = () => document.getElementById("meters");
+const hostBtnEl = () => document.getElementById("hostBtn");
+const seatEls = () => Array.from(document.querySelectorAll(".seat"));
 
-function setup(){
-  createCanvas(window.innerWidth, window.innerHeight);
+function setScene(mode) {
+  gameStarted = mode === "game";
+  document.body.classList.toggle("scene-cover", !gameStarted);
+  document.body.classList.toggle("scene-game", gameStarted);
+}
 
-  // iOS 友好：必须用户点击后才开始定位
+function loadSceneTheme() {
+  const rootStyle = getComputedStyle(document.documentElement);
+  sceneTheme = {
+    bg: (rootStyle.getPropertyValue("--scene-bg") || "#0b0f14").trim(),
+    grid: (rootStyle.getPropertyValue("--scene-grid") || "#505050").trim(),
+    text: (rootStyle.getPropertyValue("--scene-text") || "#ffffff").trim(),
+    triangle: (rootStyle.getPropertyValue("--scene-triangle") || "#508cff").trim()
+  };
+}
+
+function bindControls() {
+  if (controlsBound) return;
+  controlsBound = true;
+
+  const hostBtn = hostBtnEl();
   const startBtn = document.getElementById("startgps");
-  if (startBtn){
-    startBtn.addEventListener("click", () => {
-      startBtn.disabled = true;
-      startBtn.textContent = "定位中…";
-      startGPS();
-    });
+  const seats = seatEls();
+
+  if (hostBtn) {
+    hostBtn.type = "button";
+    hostBtn.disabled = false;
+    hostBtn.textContent = "Become Host";
+    hostBtn.onclick = () => {
+      isHost = true;
+      selectedHostSeat = 1;
+      hostBtn.textContent = "Host: Seat 1";
+      seats.forEach((seat, idx) => {
+        seat.classList.remove("host-ready");
+        seat.classList.remove("occupied");
+        seat.textContent = idx === 0 ? "Seat 1 (Host Occupied)" : `Seat ${idx + 1}`;
+      });
+      if (seats[0]) {
+        seats[0].classList.add("occupied");
+      }
+      if (startBtn) startBtn.disabled = false;
+      const s = statusEl();
+      if (s) s.textContent = "Host Occupied at Seat 1";
+    };
+  }
+
+  seats.forEach((seat, idx) => {
+    seat.onclick = () => {
+      if (!isHost) return;
+      selectedHostSeat = idx + 1;
+      seats.forEach((s, i) => {
+        s.classList.remove("host-ready");
+        s.classList.toggle("occupied", i === idx);
+        s.textContent = i === idx ? `Seat ${i + 1} (Host Occupied)` : `Seat ${i + 1}`;
+      });
+      if (startBtn) startBtn.disabled = false;
+      if (hostBtn) hostBtn.textContent = `Host: Seat ${selectedHostSeat}`;
+      const s = statusEl();
+      if (s) s.textContent = `Host Occupied at Seat ${selectedHostSeat}`;
+    };
+  });
+
+  if (startBtn) {
+    startBtn.type = "button";
+    startBtn.disabled = true;
+    startBtn.textContent = "Start game";
+    startBtn.onclick = () => {
+      if (!isHost || selectedHostSeat === null) return;
+      setScene("game");
+      startBtn.textContent = "In game";
+      const s = statusEl();
+      if (s) s.textContent = "In Game Scene";
+    };
   }
 
   const recenterBtn = document.getElementById("recenter");
-  if (recenterBtn){
-    recenterBtn.addEventListener("click", () => {
-      if (my.lat == null) return;
-      center = {lat: my.lat, lng: my.lng};
-      metersSmooth = {dx:0, dy:0};
-      statusEl().textContent = "状态：已重置中心点";
-    });
+  if (recenterBtn) {
+    recenterBtn.type = "button";
+    recenterBtn.disabled = true;
+    recenterBtn.onclick = null;
   }
 
-  statusEl().textContent = "状态：点『开始定位』";
+  const s = statusEl();
+  if (s) s.textContent = "Cover Scene (select host and seat first)";
+}
+
+function setup(){
+  const c = createCanvas(window.innerWidth, window.innerHeight);
+  c.style("pointer-events", "none");
+  loadSceneTheme();
+  setScene("cover");
+  bindControls();
 }
 
 function draw(){
-  background(10);
+  if (!gameStarted) {
+    background(sceneTheme.bg);
+    fill(18, 24, 34, 180);
+    noStroke();
+    rectMode(CENTER);
+    rect(width / 2, height / 2, Math.min(620, width - 60), 240, 20);
+    rectMode(CORNER);
+    noStroke();
+    fill(sceneTheme.text);
+    textSize(34);
+    textAlign(CENTER, CENTER);
+    text("COVER", width / 2, height / 2 - 52);
+    textSize(18);
+    text("Cat & Mouse", width / 2, height / 2 - 14);
+    textSize(14);
+    text("Press Start game to enter the GPS stage", width / 2, height / 2 + 24);
+    text("This is the cover scene", width / 2, height / 2 + 48);
+    return;
+  }
+
+  background(sceneTheme.bg);
 
   // 雷达 UI
-  stroke(80);
+  stroke(sceneTheme.grid);
   noFill();
   circle(width/2, height/2, 300);
   circle(width/2, height/2, 600);
   line(width/2-2000, height/2, width/2+2000, height/2);
   line(width/2, height/2-2000, width/2, height/2+2000);
 
-  fill(255);
+  fill(sceneTheme.text);
   noStroke();
-  textSize(14);
-  text("GPS TRIANGLE",20,height-20);
+  textSize(16);
+  textAlign(LEFT, BASELINE);
+  text("IN GAME - GPS TRIANGLE",20,height-20);
 
   if(my.lat==null){
     // 没坐标就不画三角形
@@ -82,61 +183,17 @@ function drawTriangle(x,y,heading){
   translate(x,y);
   rotate(radians(heading || 0));
   noStroke();
-  fill(80,140,255);
+  fill(sceneTheme.triangle);
   triangle(0,-14,-10,10,10,10);
   pop();
 }
 
-function startGPS(){
-  if(!navigator.geolocation){
-    statusEl().textContent = "状态：此设备不支持定位";
-    return;
-  }
-
-  // 显示权限状态（iOS 也适用）
-  if (navigator.permissions && navigator.permissions.query){
-    navigator.permissions.query({ name: "geolocation" }).then(p=>{
-      statusEl().textContent = `状态：权限 ${p.state}，正在请求定位…`;
-    }).catch(()=>{});
-  } else {
-    statusEl().textContent = "状态：正在请求定位…";
-  }
-
-  // 注意：iOS 需要 HTTPS（你现在是 trycloudflare 的 https，OK）
-  watchId = navigator.geolocation.watchPosition(
-    (pos)=>{
-      my.lat = pos.coords.latitude;
-      my.lng = pos.coords.longitude;
-      my.accuracy = pos.coords.accuracy;
-
-      // heading 常为 null，不强求
-      if (pos.coords.heading != null && !Number.isNaN(pos.coords.heading)){
-        my.heading = pos.coords.heading;
-      }
-
-      // HUD 更新
-      statusEl().textContent = "状态：定位成功 ✅";
-      accEl().textContent = "精度：" + (my.accuracy ? my.accuracy.toFixed(1)+"m" : "—");
-      coordEl().textContent = `lat/lng：${my.lat.toFixed(6)}, ${my.lng.toFixed(6)}`;
-
-      if (center){
-        metersEl().textContent = `dx/dy：${metersSmooth.dx.toFixed(1)}m, ${metersSmooth.dy.toFixed(1)}m`;
-      } else {
-        metersEl().textContent = `dx/dy：—`;
-      }
-    },
-    (err)=>{
-      // 把错误直接显示出来（你就能知道到底被什么拦了）
-      statusEl().textContent = `状态：定位失败 ❌ (${err.code}) ${err.message}`;
-    },
-    {
-      enableHighAccuracy: true,
-      maximumAge: 1000,
-      timeout: 15000
-    }
-  );
-}
-
 function windowResized(){
   resizeCanvas(window.innerWidth, window.innerHeight);
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", bindControls, { once: true });
+} else {
+  bindControls();
 }
