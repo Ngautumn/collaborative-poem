@@ -1,18 +1,35 @@
-<!DOCTYPE html>
-<html lang="en">
-  <head>
-    <script src="https://cdn.jsdelivr.net/npm/p5@1.11.11/lib/p5.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/p5@1.11.11/lib/addons/p5.sound.min.js"></script>
-    
-    
-    
-    <link rel="stylesheet" type="text/css" href="style.css">
-    <meta charset="utf-8" />
 
-  </head>
-  <body>
-    <main>
-    </main>
-    <script src="sketch.js"></script>
-  </body>
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GPS Tracking</title>
+
+  <!-- 你的样式 -->
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+  <!-- 顶部状态 HUD -->
+<div id="hud">
+  <div class="row">
+    <span class="pill" id="status">状态：等待定位</span>
+    <span class="pill" id="acc">精度：—</span>
+    <span class="pill" id="coord">lat/lng：—</span>
+    <span class="pill" id="meters">dx/dy：—</span>
+    <button id="startgps">开始定位</button>
+    <button id="recenter">重置中心点</button>
+  </div>
+</div>
+
+
+  <!-- p5 核心库 -->
+  <script src="p5.js"></script>
+
+  <!-- 你的 sketch 主程序 -->
+  <script src="sketch.js"></script>
+
+</body>
 </html>
