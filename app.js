@@ -7,7 +7,7 @@ const server = http.createServer(app);
 const io = new Server(server);
 
 const PORT = Number(process.env.PORT) || 3000;
-const HOST = process.env.HOST || "127.0.0.1";
+const HOST = process.env.HOST || "0.0.0.0";
 
 app.use(express.static("public"));
 
@@ -15,8 +15,10 @@ const MAX_SEATS = 6;
 const MIN_PLAYERS = 3;
 const MAX_PLAYERS = 6;
 const DEFAULT_ROOM_ID = "LOBBY";
+
 const CATCH_DIST = 0.06;
 const CATCH_HOLD_MS = 1200;
+const ROUND_MS = 10 * 60 * 1000;
 
 const players = {};
 const rooms = {};
@@ -34,7 +36,8 @@ function getOrCreateDefaultRoom() {
       targetCount: MIN_PLAYERS,
       phase: "lobby",
       seats: Array.from({ length: MAX_SEATS }, () => null),
-      startedAt: null
+      startedAt: null,
+      endsAt: null
     };
   }
   return rooms[DEFAULT_ROOM_ID];
@@ -55,6 +58,7 @@ function roomPublicState(room) {
     targetCount: room.targetCount,
     phase: room.phase,
     startedAt: room.startedAt,
+    endsAt: room.endsAt,
     seats: room.seats.map((sid, index) => {
       if (!sid || !players[sid]) return { index, empty: true };
       const p = players[sid];
@@ -74,6 +78,27 @@ function emitRoom(roomId) {
   const room = rooms[roomId];
   if (!room) return;
   io.to(roomId).emit("room-state", roomPublicState(room));
+}
+
+function endGame(room, reason = "time") {
+  if (!room) return;
+
+  room.phase = "lobby";
+  room.startedAt = null;
+  room.endsAt = null;
+
+  for (const sid of roomPlayerIds(room)) {
+    if (!players[sid]) continue;
+    players[sid].role = "observer";
+    players[sid].caught = false;
+  }
+
+  for (const k of proximityTimers.keys()) {
+    if (k.startsWith(`${room.id}|`)) proximityTimers.delete(k);
+  }
+
+  emitRoom(room.id);
+  io.to(room.id).emit("game-ended", { roomId: room.id, reason });
 }
 
 function clearPlayerFromRoom(socketId) {
@@ -104,6 +129,15 @@ function clearPlayerFromRoom(socketId) {
     return;
   }
 
+  if (roomPlayerIds(room).length === 0 && room.id === DEFAULT_ROOM_ID) {
+    room.hostId = null;
+    room.phase = "lobby";
+    room.startedAt = null;
+    room.endsAt = null;
+    room.targetCount = MIN_PLAYERS;
+    room.seats = Array.from({ length: MAX_SEATS }, () => null);
+  }
+
   emitRoom(room.id);
 }
 
@@ -117,10 +151,7 @@ function startGame(room, bySocketId) {
 
   const seated = roomPlayerIds(room);
   if (seated.length < 1) {
-    return {
-      ok: false,
-      message: "Need at least 1 seated player before start."
-    };
+    return { ok: false, message: "Need at least 1 seated player before start." };
   }
 
   const catIndex = Math.floor(Math.random() * seated.length);
@@ -138,24 +169,34 @@ function startGame(room, bySocketId) {
 
   room.phase = "running";
   room.startedAt = Date.now();
+  room.endsAt = room.startedAt + ROUND_MS;
+
   emitRoom(room.id);
 
   io.to(room.id).emit("game-started", {
     roomId: room.id,
     targetCount: room.targetCount,
-    catId
+    catId,
+    endsAt: room.endsAt
   });
 
   return { ok: true };
 }
 
 function tickCatchRules() {
+  const now = Date.now();
+
   for (const room of Object.values(rooms)) {
     if (room.phase !== "running") continue;
 
+    if (typeof room.endsAt === "number" && now >= room.endsAt) {
+      endGame(room, "time");
+      continue;
+    }
+
     const ids = roomPlayerIds(room);
     const cats = ids.map((id) => players[id]).filter((p) => p?.role === "cat");
-    const mice = ids.map((id) => players[id]).filter((p) => p?.role === "mouse" && !p.caught);
+    const mice = ids.map((id) => players[id]).filter((p) => p?.role === "mouse" && !p?.caught);
 
     for (const cat of cats) {
       for (const mouse of mice) {
@@ -163,7 +204,6 @@ function tickCatchRules() {
         const dy = cat.y - mouse.y;
         const d = Math.hypot(dx, dy);
         const key = `${room.id}|${cat.id}|${mouse.id}`;
-        const now = Date.now();
 
         if (d < CATCH_DIST) {
           if (!proximityTimers.has(key)) proximityTimers.set(key, now);
@@ -183,10 +223,13 @@ function tickCatchRules() {
       }
     }
 
-    io.to(room.id).emit("players", ids.reduce((acc, sid) => {
-      if (players[sid]) acc[sid] = players[sid];
-      return acc;
-    }, {}));
+    io.to(room.id).emit(
+      "players",
+      ids.reduce((acc, sid) => {
+        if (players[sid]) acc[sid] = players[sid];
+        return acc;
+      }, {})
+    );
   }
 }
 
@@ -211,7 +254,12 @@ io.on("connection", (socket) => {
   socket.join(defaultRoom.id);
   emitRoom(defaultRoom.id);
 
-  socket.emit("hello", { id: socket.id, minPlayers: MIN_PLAYERS, maxPlayers: MAX_PLAYERS, maxSeats: MAX_SEATS });
+  socket.emit("hello", {
+    id: socket.id,
+    minPlayers: MIN_PLAYERS,
+    maxPlayers: MAX_PLAYERS,
+    maxSeats: MAX_SEATS
+  });
 
   socket.on("take-seat", ({ seatIndex }) => {
     const p = players[socket.id];
@@ -222,7 +270,11 @@ io.on("connection", (socket) => {
 
     const idx = Number(seatIndex);
     if (!Number.isInteger(idx) || idx < 0 || idx >= MAX_SEATS) return;
-    if (idx === 0 && room.hostId && room.hostId !== socket.id) return;
+
+    if (idx === 0 && room.hostId !== socket.id) {
+      socket.emit("room-error", { message: "Seat 1 is reserved for host." });
+      return;
+    }
     if (room.seats[idx] && room.seats[idx] !== socket.id) return;
 
     if (typeof p.seatIndex === "number" && room.seats[p.seatIndex] === socket.id) {
@@ -240,52 +292,53 @@ io.on("connection", (socket) => {
     if (!p?.roomId) return;
 
     const room = getRoom(p.roomId);
-    if (!room || room.phase !== "lobby") return;
+    if (!room) return;
 
     if (!asHost) {
       if (room.hostId === socket.id) {
         room.hostId = null;
-        if (typeof p.seatIndex === "number") {
-          p.name = `Player ${p.seatIndex + 1}`;
-        }
+        if (typeof p.seatIndex === "number") p.name = `Player ${p.seatIndex + 1}`;
         emitRoom(room.id);
       }
       return;
     }
 
-    const centerOccupant = room.seats[0];
+    const hostSeatIndex = 0;
+    const hostSeatOccupant = room.seats[hostSeatIndex];
+    const myCurrentSeat = typeof p.seatIndex === "number" ? p.seatIndex : null;
 
-    if (typeof p.seatIndex !== "number") {
-      if (centerOccupant && centerOccupant !== socket.id) {
-        const freeSeat = room.seats.findIndex((sid, idx) => idx !== 0 && !sid);
-        if (freeSeat === -1) {
-          socket.emit("room-error", { message: "No free seat to move current center player." });
-          return;
+    if (hostSeatOccupant && hostSeatOccupant !== socket.id) {
+      if (myCurrentSeat !== null) {
+        room.seats[myCurrentSeat] = hostSeatOccupant;
+        if (players[hostSeatOccupant]) {
+          players[hostSeatOccupant].seatIndex = myCurrentSeat;
+          players[hostSeatOccupant].name = `Player ${myCurrentSeat + 1}`;
         }
-        room.seats[freeSeat] = centerOccupant;
-        if (players[centerOccupant]) {
-          players[centerOccupant].seatIndex = freeSeat;
-          players[centerOccupant].name = `Player ${freeSeat + 1}`;
+      } else {
+        const freeSeat = room.seats.findIndex((sid, idx) => idx !== hostSeatIndex && !sid);
+        if (freeSeat !== -1) {
+          room.seats[freeSeat] = hostSeatOccupant;
+          if (players[hostSeatOccupant]) {
+            players[hostSeatOccupant].seatIndex = freeSeat;
+            players[hostSeatOccupant].name = `Player ${freeSeat + 1}`;
+          }
+        } else if (players[hostSeatOccupant]) {
+          players[hostSeatOccupant].seatIndex = null;
+          players[hostSeatOccupant].name = "player";
+          players[hostSeatOccupant].role = "observer";
         }
       }
-      room.seats[0] = socket.id;
-      p.seatIndex = 0;
-      p.name = "Host";
-    } else if (p.seatIndex !== 0) {
-      room.seats[p.seatIndex] = centerOccupant || null;
-      room.seats[0] = socket.id;
-
-      if (centerOccupant && players[centerOccupant]) {
-        players[centerOccupant].seatIndex = p.seatIndex;
-        players[centerOccupant].name = `Player ${p.seatIndex + 1}`;
-      }
-      p.seatIndex = 0;
-      p.name = "Host";
-    } else {
-      p.name = "Host";
     }
 
+    if (myCurrentSeat !== null && myCurrentSeat !== hostSeatIndex) {
+      room.seats[myCurrentSeat] = null;
+    }
+
+    room.seats[hostSeatIndex] = socket.id;
+    p.seatIndex = hostSeatIndex;
+    p.name = "Host";
     room.hostId = socket.id;
+
     emitRoom(room.id);
   });
 
@@ -314,9 +367,7 @@ io.on("connection", (socket) => {
     if (!room) return;
 
     const result = startGame(room, socket.id);
-    if (!result.ok) {
-      socket.emit("room-error", { message: result.message });
-    }
+    if (!result.ok) socket.emit("room-error", { message: result.message });
   });
 
   socket.on("pos", ({ x, y }) => {
@@ -333,22 +384,14 @@ io.on("connection", (socket) => {
     const p = players[socket.id];
     if (!p) return;
 
-    if (
-      typeof lat !== "number" ||
-      typeof lon !== "number" ||
-      !Number.isFinite(lat) ||
-      !Number.isFinite(lon)
-    ) {
+    if (typeof lat !== "number" || typeof lon !== "number" || !Number.isFinite(lat) || !Number.isFinite(lon)) {
       return;
     }
 
     p.gps = {
       lat: Math.max(-90, Math.min(90, lat)),
       lon: Math.max(-180, Math.min(180, lon)),
-      accuracy:
-        typeof accuracy === "number" && Number.isFinite(accuracy)
-          ? Math.max(0, accuracy)
-          : null,
+      accuracy: typeof accuracy === "number" && Number.isFinite(accuracy) ? Math.max(0, accuracy) : null,
       ts: typeof ts === "number" && Number.isFinite(ts) ? ts : Date.now()
     };
     p.last = Date.now();
@@ -368,15 +411,16 @@ io.on("connection", (socket) => {
   });
 });
 
+// ----- Server startup -----
 server.on("error", (err) => {
   if (err?.code === "EADDRINUSE") {
     console.error(`[startup] Port ${PORT} is already in use.`);
-    console.error(`[startup] Try: PORT=3001 npm start`);
+    console.error("[startup] Try: PORT=3001 npm start");
     return;
   }
   if (err?.code === "EACCES" || err?.code === "EPERM") {
     console.error(`[startup] Permission denied for ${HOST}:${PORT}.`);
-    console.error(`[startup] Try: HOST=127.0.0.1 PORT=3001 npm start`);
+    console.error("[startup] Try: HOST=0.0.0.0 PORT=3001 npm start");
     return;
   }
   console.error("[startup] Server failed to start:", err);

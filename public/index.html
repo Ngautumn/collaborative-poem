@@ -1,43 +1,125 @@
-
 <!DOCTYPE html>
-<html lang="zh">
+<html>
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>GPS Tracking</title>
+  <meta charset="utf-8"/>
+  <title>Cat & Mouse GPS Room</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 
-  <!-- 你的样式 -->
-  <link rel="stylesheet" href="style.css">
+  <!-- socket -->
+  <script src="/socket.io/socket.io.js"></script>
+
+  <!-- p5 -->
+  <script src="https://cdn.jsdelivr.net/npm/p5@1.9.0/lib/p5.min.js"></script>
+
+  <!-- 样式 -->
+  <link rel="stylesheet" href="style.css"/>
+
+  <!-- 地图层级控制 -->
+  <style>
+    html,body{
+      margin:0;
+      padding:0;
+      height:100%;
+      overflow:hidden;
+    }
+
+    /* Google map：底层 */
+    #map{
+  position:fixed;
+  inset:0;
+  width:100vw;
+  height:100vh;
+  z-index:0;
+}
+
+
+    /* p5 canvas：透明叠加 */
+    canvas{
+      position:fixed !important;
+      inset:0 !important;
+      z-index:5;
+      background:transparent !important;
+      pointer-events:none;
+    }
+
+    /* HUD */
+    #hud{
+      position:fixed;
+      top:12px;
+      left:12px;
+      z-index:10;
+    }
+
+    /* lobby */
+    #lobbyOverlay{
+      z-index:20;
+    }
+  </style>
 </head>
 
 <body>
 
-  <!-- 顶部状态 HUD -->
-<div id="hud">
-  <div class="row">
-    <span class="pill" id="status">状态：等待定位</span>
-    <span class="pill" id="acc">精度：—</span>
-    <span class="pill" id="coord">lat/lng：—</span>
-    <span class="pill" id="meters">dx/dy：—</span>
-    <button id="hostBtn">Become Host</button>
-    <button id="startgps">Start game</button>
-    <button id="recenter">重置中心点</button>
+  <!-- Google Map 容器 -->
+  <div id="map"></div>
+
+  <!-- HUD -->
+  <div id="hud">
+    <div class="row">
+      <span class="pill" id="status">Status: Waiting for GPS</span>
+      <span class="pill" id="acc">Accuracy: —</span>
+      <span class="pill" id="coord">lat/lng: —</span>
+      <span class="pill" id="meters">dx/dy: —</span>
+      <button id="startgps">Restart GPS</button>
+      <button id="recenter">Recenter</button>
+    </div>
   </div>
-  <div class="seats" id="seatBoard">
-    <div class="seat" id="seat1">Seat 1</div>
-    <div class="seat" id="seat2">Seat 2</div>
-    <div class="seat" id="seat3">Seat 3</div>
-    <div class="seat" id="seat4">Seat 4</div>
-    <div class="seat" id="seat5">Seat 5</div>
-    <div class="seat" id="seat6">Seat 6</div>
+
+  <!-- Lobby -->
+  <div id="lobbyOverlay" class="overlay">
+    <div class="panel">
+      <div class="title">Cat, Mice</div>
+      <div class="sub">
+        Sit first, then start. 6 seats. 1 cat, others mice.
+      </div>
+
+      <div class="stage">
+        <div class="table-title">Seats (Seat 1 host-only)</div>
+        <div id="seats" class="seats"></div>
+        <div id="roomLine" class="room-line"></div>
+        <div id="statusText" class="room-line"></div>
+        <div id="errorText" class="error"></div>
+
+        <div class="start-wrap">
+          <button id="hostBtn" class="secondary">Become Host</button>
+          <button id="startBtn" class="warn">Start game (host only)</button>
+        </div>
+      </div>
+    </div>
   </div>
-</div>
 
+  <!-- Google Maps 初始化 -->
+  <script>
+    let map;
 
-  <!-- p5 核心库 -->
-  <script src="p5.js"></script>
+    function initGoogleMap(){
+      map = new google.maps.Map(document.getElementById("map"), {
+        center: { lat: 51.5074, lng: -0.1278 }, // London 默认
+        zoom: 18,
+        mapTypeControl:false,
+        streetViewControl:false,
+        fullscreenControl:false
+      });
 
-  <!-- 你的 sketch 主程序 -->
+      window.__gmLoaded = true;
+    }
+  </script>
+
+  <!-- 重点：这里填入你的真实 KEY -->
+  <script async defer
+    src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDgxuwSEW4frCof1TgO9qwLD5QV1ZDInkk&callback=initGoogleMap">
+  </script>
+
+  <!-- p5 sketch -->
   <script src="sketch.js"></script>
 
 </body>
