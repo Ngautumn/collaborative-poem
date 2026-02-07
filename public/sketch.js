@@ -7,7 +7,7 @@ const SCALE = 0.9;
 
 let watchId = null;
 
-// HUD
+// HUD  HUD retch
 const statusEl = () => document.getElementById("status");
 const accEl = () => document.getElementById("acc");
 const coordEl = () => document.getElementById("coord");
