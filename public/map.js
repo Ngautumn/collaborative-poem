@@ -1,5 +1,5 @@
 /* eslint-env browser */
-/* global width, height, background, noStroke, fill, rect, ellipse, circle, stroke, strokeWeight, line, noFill, textAlign, textSize, text, CENTER, LEFT, TOP, image */
+/* global width, height, background, noStroke, fill, rect, ellipse, circle, stroke, strokeWeight, line, noFill, textAlign, textSize, text, CENTER, LEFT, TOP */
 
 (function bootstrapCartoonMap() {
   const root = /** @type {any} */ (window);
@@ -13,13 +13,6 @@
 
   function create() {
     const localRoleFallback = {};
-    const spriteCache = {};
-    const spriteSrc = {
-      cat: "images/cat.png",
-      mouse1: "images/mouse1.png",
-      mouse2: "images/mouse2.png",
-      mouse3: "images/mouse3.png"
-    };
     const seatAnchors = [
       { x: 0.50, y: 0.16 },
       { x: 0.76, y: 0.31 },
@@ -28,43 +21,6 @@
       { x: 0.24, y: 0.65 },
       { x: 0.24, y: 0.31 }
     ];
-
-    function getCachedImage(key) {
-      if (spriteCache[key]) return spriteCache[key];
-      const img = new Image();
-      img.src = spriteSrc[key];
-      spriteCache[key] = img;
-      return img;
-    }
-
-    function hashSocketId(socketId) {
-      const raw = String(socketId || "");
-      let h = 0;
-      for (let i = 0; i < raw.length; i += 1) {
-        h = ((h << 5) - h + raw.charCodeAt(i)) | 0;
-      }
-      return Math.abs(h);
-    }
-
-    function getRoleSprite(role, socketId) {
-      if (role === "cat") return getCachedImage("cat");
-      const pick = (hashSocketId(socketId) % 3) + 1;
-      return getCachedImage(`mouse${pick}`);
-    }
-
-    function drawCircularSprite(img, x, y, size) {
-      if (!img || !img.complete || !img.naturalWidth) return false;
-      const r = size * 0.5;
-      const ctx = drawingContext;
-      ctx.save();
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.closePath();
-      ctx.clip();
-      image(img, x - r, y - r, size, size);
-      ctx.restore();
-      return true;
-    }
 
     function drawBaseMap() {
       background("#f4e7c8");
@@ -120,17 +76,10 @@
       function drawOnePlayer(socketId, info, px, py, isMe) {
         const roleText = displayRole(socketId, info);
         const color = info.caught ? "#b3aebd" : roleColor(info.role, isMe);
-        const roleForSprite = info?.role === "cat" || info?.role === "mouse" ? info.role : roleText;
-        const sprite = getRoleSprite(roleForSprite, socketId);
 
-        // Always draw a base token first, so player is visible even if sprite is transparent/not loaded.
         noStroke();
         fill(color);
         circle(px, py, 52);
-
-        if (!info.caught) {
-          drawCircularSprite(sprite, px, py, 52);
-        }
 
         stroke("#3b2d3a");
         strokeWeight(3);
