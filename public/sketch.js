@@ -1,24 +1,23 @@
+/* global io, createCanvas, textFont, windowWidth, windowHeight, noStroke, fill, rect, ellipse, background, clear, resizeCanvas */
+
 /*
   Clean two-scene controller:
   - P2 Lobby: p5 draws only the yellow/blue/green background + HTML lobby overlay on top.
-  - P1 Running: Google Map full-screen + multi-user triangles (Google markers). p5 stays transparent.
+  - P1 Running: p5 stays transparent.
 */
 
 let socket = null;
 let myId = null;
 let players = {};
 let roomState = null;
-
-let gpsWatchId = null;
-let gpsText = "GPS: waiting";
-let myGps = { lat: null, lng: null, accuracy: null, heading: 0 };
+const root = /** @type {any} */ (window);
+let mapScene = null;
+let playerController = null;
+let timerLoopId = null;
+let localGameEndsAt = null;
 
 let gameStarted = false;
 let pendingEnterGame = false;
-
-const metersPerDegLat = 111320;
-let gpsCenter = null;
-let gpsMetersSmooth = { dx: 0, dy: 0 };
 
 const actionBusy = { start: false };
 
@@ -33,6 +32,8 @@ const SEAT_SLOT_POS = [
 
 // ----- DOM refs -----
 const ui = {
+  coverScene: document.getElementById("coverScene"),
+  gameScene: document.getElementById("gameScene"),
   overlay: document.getElementById("lobbyOverlay"),
   hostBtn: document.getElementById("hostBtn"),
   startBtn: document.getElementById("startBtn"),
@@ -40,32 +41,15 @@ const ui = {
   statusText: document.getElementById("statusText"),
   errorText: document.getElementById("errorText"),
   seats: document.getElementById("seats"),
-  map: document.getElementById("map"),
   hud: document.getElementById("hud")
 };
 
 const statusEl = () => document.getElementById("status");
-const accEl = () => document.getElementById("acc");
-const coordEl = () => document.getElementById("coord");
-const metersEl = () => document.getElementById("meters");
-const startGpsBtnEl = () => document.getElementById("startgps");
-const recenterBtnEl = () => document.getElementById("recenter");
-
-// ----- Google Map state -----
-let gmap = null;
-const playerMarkers = {}; // { socketId: google.maps.Marker }
+const timerEl = () => document.getElementById("timer");
 
 // ----- HUD -----
 function setHudStatus(text) {
   if (statusEl()) statusEl().textContent = `Status: ${text}`;
-}
-
-function renderHud(meters = null) {
-  if (accEl()) accEl().textContent = `Accuracy: ${myGps.accuracy ? `${myGps.accuracy.toFixed(1)}m` : "—"}`;
-  if (coordEl()) coordEl().textContent = myGps.lat == null ? "lat/lng: —" : `lat/lng: ${myGps.lat.toFixed(6)}, ${myGps.lng.toFixed(6)}`;
-  if (metersEl()) {
-    metersEl().textContent = meters ? `dx/dy: ${meters.dx.toFixed(1)}m, ${meters.dy.toFixed(1)}m` : "dx/dy: —";
-  }
 }
 
 function setError(msg = "") {
@@ -76,22 +60,52 @@ function setStatus(msg) {
   if (ui.statusText) ui.statusText.textContent = msg;
 }
 
+function formatLeftMs(ms) {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const mm = String(Math.floor(totalSec / 60)).padStart(2, "0");
+  const ss = String(totalSec % 60).padStart(2, "0");
+  return `${mm}:${ss}`;
+}
+
+function renderTimer() {
+  const t = timerEl();
+  if (!t) return;
+  if (!gameStarted) {
+    t.textContent = "--:--";
+    return;
+  }
+
+  const targetEndsAt = Number.isFinite(roomState?.endsAt) ? roomState.endsAt : localGameEndsAt;
+  if (!Number.isFinite(targetEndsAt)) {
+    t.textContent = "--:--";
+    return;
+  }
+
+  const left = targetEndsAt - Date.now();
+  t.textContent = formatLeftMs(left);
+}
+
+function startTimerLoop() {
+  if (timerLoopId !== null) return;
+  timerLoopId = window.setInterval(renderTimer, 250);
+}
+
 // ----- Scene switching -----
 function setGameScene(active) {
   gameStarted = active;
-  if (!active) pendingEnterGame = false;
+  if (!active) {
+    pendingEnterGame = false;
+    localGameEndsAt = null;
+  }
 
-  // Lobby overlay visible only in lobby
-  ui.overlay.style.display = active ? "none" : "flex";
+  document.body.classList.toggle("scene-cover", !active);
+  document.body.classList.toggle("scene-game", active);
 
-  // HUD visible only in running
-  ui.hud.style.display = active ? "block" : "none";
-
-  // Map visible only in running
-  ui.map.style.display = active ? "block" : "none";
-
-  // When entering running, build map if possible
-  if (active) ensureMap();
+  if (ui.coverScene) ui.coverScene.style.display = active ? "none" : "block";
+  if (ui.gameScene) ui.gameScene.style.display = active ? "block" : "none";
+  if (active) ensureLocalPlayer();
+  playerController?.setEnabled(active);
+  renderTimer();
 }
 
 // ----- Socket -----
@@ -101,12 +115,12 @@ function isConnected() {
 
 function updateActionButtons() {
   const inRoom = Boolean(roomState?.id);
-  const isHost = inRoom && roomState?.hostId === myId;
   const inLobby = roomState?.phase === "lobby";
+  const isHost = inRoom && roomState?.hostId === myId;
 
   ui.hostBtn.disabled = !isConnected() || actionBusy.start;
   ui.hostBtn.textContent = isHost ? "You Are Host (Seat 1)" : "Become Host";
-  ui.startBtn.disabled = !isConnected() || actionBusy.start || !isHost || !inLobby;
+  ui.startBtn.disabled = !isConnected() || actionBusy.start || !inLobby;
 }
 
 function initSocket() {
@@ -115,9 +129,9 @@ function initSocket() {
 
   socket.on("connect", () => {
     myId = socket.id;
+    ensureLocalPlayer();
+    playerController?.setSocket(socket);
     setStatus("Connected. Tap + on a seat to join.");
-    setHudStatus("Requesting location...");
-    startGPS();
     updateActionButtons();
   });
 
@@ -136,28 +150,33 @@ function initSocket() {
   socket.on("room-state", (state) => {
     roomState = state;
 
-    // Enter running view only when host started game
-    if (state?.phase === "running" && pendingEnterGame) {
-      setGameScene(true);
+    // Allow local enter-game flow even if server still reports lobby.
+    const serverRunning = state?.phase === "running";
+    const shouldShowGame = serverRunning || pendingEnterGame;
+    setGameScene(shouldShowGame);
+    if (serverRunning) {
       pendingEnterGame = false;
-    }
-    // If server says lobby, go back to lobby view
-    if (state?.phase !== "running") {
-      setGameScene(false);
+      if (Number.isFinite(state.endsAt)) {
+        localGameEndsAt = state.endsAt;
+      }
     }
 
     renderRoomState();
     updateActionButtons();
+    renderTimer();
   });
 
   socket.on("players", (allPlayers) => {
+    const myLocal = myId ? players[myId] : null;
     players = allPlayers || {};
-    syncMarkers(); // ✅ multiplayer triangles on map
+    if (myId && myLocal && !players[myId]) {
+      players[myId] = myLocal;
+    }
+    if (gameStarted) ensureLocalPlayer();
   });
 
   socket.on("room-error", ({ message }) => {
     setError(message || "Action failed");
-    pendingEnterGame = false;
     updateActionButtons();
   });
 
@@ -165,73 +184,10 @@ function initSocket() {
     // server confirmed running
     setGameScene(true);
     pendingEnterGame = false;
+    if (Number.isFinite(roomState?.endsAt)) {
+      localGameEndsAt = roomState.endsAt;
+    }
   });
-}
-
-// ----- GPS -----
-function startGPS() {
-  if (!("geolocation" in navigator)) {
-    gpsText = "GPS: not supported on this device";
-    setHudStatus("Geolocation not supported");
-    return;
-  }
-
-  gpsText = "GPS: requesting permission...";
-  setHudStatus("Requesting location...");
-
-  if (gpsWatchId !== null) navigator.geolocation.clearWatch(gpsWatchId);
-
-  gpsWatchId = navigator.geolocation.watchPosition(
-    (pos) => {
-      const lat = pos.coords.latitude;
-      const lon = pos.coords.longitude;
-      const accuracy = pos.coords.accuracy;
-
-      myGps.lat = lat;
-      myGps.lng = lon;
-      myGps.accuracy = accuracy;
-
-      if (pos.coords.heading != null && !Number.isNaN(pos.coords.heading)) {
-        myGps.heading = pos.coords.heading;
-      }
-
-      if (!gpsCenter) gpsCenter = { lat, lng: lon };
-
-      gpsText = `GPS: ${lat.toFixed(5)}, ${lon.toFixed(5)} (±${Math.round(accuracy)}m)`;
-      setHudStatus("GPS locked");
-      renderHud(getLocalGpsMeters());
-
-      // emit to server
-      if (socket && socket.connected) {
-        socket.emit("gps", { lat, lon, accuracy, ts: Date.now() });
-      }
-
-      // if running, ensure map exists & recenter first time
-      if (gameStarted) {
-        ensureMap();
-        // update my marker immediately (even before players broadcast)
-        updateMarkerForMe();
-      }
-
-      renderRoomState();
-    },
-    (err) => {
-      gpsText = `GPS error: ${err.message}`;
-      setHudStatus(`GPS failed (${err.code}) ${err.message}`);
-      renderRoomState();
-    },
-    { enableHighAccuracy: true, maximumAge: 10000, timeout: 15000 }
-  );
-}
-
-function getLocalGpsMeters() {
-  if (myGps.lat == null || myGps.lng == null || !gpsCenter) return null;
-  const metersPerDegLng = 111320 * Math.cos((myGps.lat * Math.PI) / 180);
-  const dx = (myGps.lng - gpsCenter.lng) * metersPerDegLng;
-  const dy = (myGps.lat - gpsCenter.lat) * metersPerDegLat;
-  gpsMetersSmooth.dx += (dx - gpsMetersSmooth.dx) * 0.2;
-  gpsMetersSmooth.dy += (dy - gpsMetersSmooth.dy) * 0.2;
-  return { dx: gpsMetersSmooth.dx, dy: gpsMetersSmooth.dy };
 }
 
 // ----- Lobby seats -----
@@ -239,6 +195,40 @@ function mySeatIndex() {
   if (!roomState?.seats) return null;
   const i = roomState.seats.findIndex((s) => !s.empty && s.socketId === myId);
   return i >= 0 ? i : null;
+}
+
+function ensureLocalPlayer() {
+  if (!myId) return;
+  if (!players[myId]) {
+    players[myId] = {
+      id: myId,
+      role: "observer",
+      x: 0.5,
+      y: 0.5,
+      caught: false
+    };
+  }
+  if (!Number.isFinite(players[myId].x)) players[myId].x = 0.5;
+  if (!Number.isFinite(players[myId].y)) players[myId].y = 0.5;
+  if (typeof players[myId].caught !== "boolean") players[myId].caught = false;
+}
+
+function applySeatSpawnForMe() {
+  if (!myId) return;
+  ensureLocalPlayer();
+  const seat = mySeatIndex();
+  if (seat === null) return;
+  const anchors = [
+    { x: 0.50, y: 0.16 },
+    { x: 0.76, y: 0.31 },
+    { x: 0.76, y: 0.65 },
+    { x: 0.50, y: 0.80 },
+    { x: 0.24, y: 0.65 },
+    { x: 0.24, y: 0.31 }
+  ];
+  const a = anchors[seat] || { x: 0.5, y: 0.5 };
+  if (!Number.isFinite(players[myId].x)) players[myId].x = a.x;
+  if (!Number.isFinite(players[myId].y)) players[myId].y = a.y;
 }
 
 function autoTakeSeatFromBoard(clientX, clientY) {
@@ -300,7 +290,7 @@ function renderSeats() {
       const occupant = players[seat.socketId];
       const icon = occupant?.role === "cat" ? "🐱" : occupant?.role === "mouse" ? "🐭" : "🙂";
       const seatCircle = mine ? `<div class="seat-circle seated-mark">入座</div>` : `<div class="seat-circle">${icon}</div>`;
-      btn.innerHTML = `<div class="idx">Seat ${seat.index + 1}</div><div class="name">${seat.name}</div>${seatCircle}<div class="seat-shadow"></div><div class="meta gps ${seat.gpsReady ? "ok" : "no"}">${seat.gpsReady ? "GPS ready" : "GPS not ready"}</div>${hostTag}`;
+      btn.innerHTML = `<div class="idx">Seat ${seat.index + 1}</div><div class="name">${seat.name}</div>${seatCircle}<div class="seat-shadow"></div>${hostTag}`;
       btn.onclick = () => {
         if (mine) socket?.emit("leave-seat");
       };
@@ -327,121 +317,14 @@ function renderRoomState() {
   if (roomState.phase === "running") {
     const myInfo = players[myId];
     const roleText = myInfo?.role === "cat" ? "Cat" : myInfo?.role === "mouse" ? "Mouse" : "Observer";
-    setStatus(`Game running. Your role: ${roleText}. ${gpsText}`);
+    setStatus(`Game running. Your role: ${roleText}.`);
   } else {
     const seat = mySeatIndex();
     const seatText = seat === null ? "Tap + to take a seat" : `You are in seat ${seat + 1}`;
     const hostHint = seat === null
       ? "Tap 'Become Host' to become host at Seat 1."
       : isHost ? "You are host at Seat 1." : "Tap 'Become Host' to take Seat 1.";
-    setStatus(`${seatText}. ${hostHint} ${gpsText}`);
-  }
-}
-
-// ----- Google Map + markers (triangles) -----
-function ensureMap() {
-  // Only create map when running and Google API loaded
-  if (!gameStarted) return;
-  if (!window.__gmLoaded) return;
-
-  if (!gmap) {
-    const fallback = { lat: 51.5074, lng: -0.1278 }; // London
-    const center = (myGps.lat != null && myGps.lng != null) ? { lat: myGps.lat, lng: myGps.lng } : fallback;
-
-    gmap = new google.maps.Map(ui.map, {
-      center,
-      zoom: 17,
-      disableDefaultUI: true,
-      clickableIcons: false,
-      gestureHandling: "greedy"
-    });
-  }
-
-  // Update markers once map exists
-  syncMarkers();
-}
-
-function triangleSymbol(color, rotationDeg) {
-  return {
-    path: google.maps.SymbolPath.FORWARD_CLOSED_ARROW,
-    scale: 5,
-    rotation: rotationDeg || 0,
-    fillColor: color,
-    fillOpacity: 1,
-    strokeColor: "#ffffff",
-    strokeWeight: 2
-  };
-}
-
-function colorForRole(role) {
-  if (role === "cat") return "#ff5a3c";
-  if (role === "mouse") return "#2ecc71";
-  return "#888888";
-}
-
-function updateMarkerForMe() {
-  if (!gmap) return;
-  if (myGps.lat == null || myGps.lng == null) return;
-
-  const p = players[myId] || { id: myId, name: "me", role: "observer" };
-  const pos = { lat: myGps.lat, lng: myGps.lng };
-
-  if (!playerMarkers[myId]) {
-    playerMarkers[myId] = new google.maps.Marker({
-      map: gmap,
-      position: pos,
-      title: p.name || "me",
-      icon: triangleSymbol(colorForRole(p.role), myGps.heading || 0)
-    });
-  } else {
-    playerMarkers[myId].setMap(gmap);
-    playerMarkers[myId].setPosition(pos);
-    playerMarkers[myId].setIcon(triangleSymbol(colorForRole(p.role), myGps.heading || 0));
-    playerMarkers[myId].setTitle(p.name || "me");
-  }
-}
-
-function syncMarkers() {
-  if (!gmap) return;
-
-  // always ensure "me" is visible if we have GPS
-  updateMarkerForMe();
-
-  // others: from server players.gps
-  for (const [id, p] of Object.entries(players)) {
-    if (!p) continue;
-    if (id === myId) continue;
-
-    const gps = p.gps;
-    if (!gps || typeof gps.lat !== "number" || typeof gps.lon !== "number") {
-      if (playerMarkers[id]) playerMarkers[id].setMap(null);
-      continue;
-    }
-
-    const pos = { lat: gps.lat, lng: gps.lon };
-
-    if (!playerMarkers[id]) {
-      playerMarkers[id] = new google.maps.Marker({
-        map: gmap,
-        position: pos,
-        title: p.name || "player",
-        icon: triangleSymbol(colorForRole(p.role), 0)
-      });
-    } else {
-      playerMarkers[id].setMap(gmap);
-      playerMarkers[id].setPosition(pos);
-      playerMarkers[id].setIcon(triangleSymbol(colorForRole(p.role), 0));
-      playerMarkers[id].setTitle(p.name || "player");
-    }
-  }
-
-  // cleanup removed players
-  for (const id of Object.keys(playerMarkers)) {
-    if (id === myId) continue;
-    if (!players[id]) {
-      playerMarkers[id].setMap(null);
-      delete playerMarkers[id];
-    }
+    setStatus(`${seatText}. ${hostHint}`);
   }
 }
 
@@ -463,36 +346,18 @@ function bindUI() {
     if (!isConnected()) return setError("Not connected.");
     if (!roomState?.id) return setError("Waiting for room state...");
     if (roomState.phase !== "lobby") return;
-    if (roomState.hostId !== myId) return setError("Only host can start the game.");
 
     setError("");
-    setStatus("Starting game...");
+    setStatus("Game scene opened.");
     pendingEnterGame = true;
+    localGameEndsAt = Date.now() + (5 * 60 * 1000);
+    applySeatSpawnForMe();
+    ensureLocalPlayer();
+    players[myId].caught = false;
+    setGameScene(true);
+    playerController?.setEnabled(true);
     socket?.emit("start-game");
   };
-
-  const startGpsBtn = startGpsBtnEl();
-  if (startGpsBtn) {
-    startGpsBtn.addEventListener("click", () => {
-      startGPS();
-      setHudStatus("Requesting location...");
-    });
-  }
-
-  const recenterBtn = recenterBtnEl();
-  if (recenterBtn) {
-    recenterBtn.addEventListener("click", () => {
-      if (!gmap) return;
-      if (myGps.lat == null || myGps.lng == null) return;
-      gmap.setCenter({ lat: myGps.lat, lng: myGps.lng });
-      gmap.setZoom(18);
-
-      gpsCenter = { lat: myGps.lat, lng: myGps.lng };
-      gpsMetersSmooth = { dx: 0, dy: 0 };
-      setHudStatus("Center reset");
-      renderHud({ dx: 0, dy: 0 });
-    });
-  }
 
   updateActionButtons();
 }
@@ -500,9 +365,19 @@ function bindUI() {
 // ----- p5 -----
 function setup() {
   bindUI();
-  initSocket();
   createCanvas(windowWidth, windowHeight);
   textFont("Trebuchet MS");
+  mapScene = root.appMapScene?.create ? root.appMapScene.create() : null;
+  playerController = root.appPlayers?.create
+    ? root.appPlayers.create({
+      getPlayers: () => players,
+      getMyId: () => myId,
+      onStatus: (t) => setHudStatus(t)
+    })
+    : null;
+
+  initSocket();
+  startTimerLoop();
 
   // Start in lobby view
   setGameScene(false);
@@ -523,31 +398,23 @@ function drawLobbyBackground() {
   ellipse(width * 0.82, height * 0.16, 130, 82);
 }
 
-function draw() {
-  // Update HUD text (both scenes)
-  renderHud(getLocalGpsMeters());
 
+function draw() {
   if (!gameStarted) {
-    // ✅ Lobby = draw the colored background
+    // Lobby = draw the colored background
     background("#000"); // clear old frame
     drawLobbyBackground();
     return;
   }
 
-  // ✅ Running = keep canvas fully transparent so only map shows
-  clear();
-
-  // Ensure map exists (if google loaded)
-  ensureMap();
+  // Running = draw cartoon map in game scene
+  if (mapScene?.draw) {
+    mapScene.draw({ roomState, players, myId });
+  } else {
+    clear();
+  }
 }
 
 function windowResized() {
   resizeCanvas(windowWidth, windowHeight);
 }
-
-// cleanup
-window.addEventListener("beforeunload", () => {
-  if (gpsWatchId !== null && "geolocation" in navigator) {
-    navigator.geolocation.clearWatch(gpsWatchId);
-  }
-});

@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8"/>
-  <title>Cat & Mouse GPS Room</title>
+  <title>Cat & Mouse Room</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 
   <!-- socket -->
@@ -14,7 +14,7 @@
   <!-- 样式 -->
   <link rel="stylesheet" href="style.css"/>
 
-  <!-- 地图层级控制 -->
+  <!-- 页面层级控制 -->
   <style>
     html,body{
       margin:0;
@@ -22,16 +22,6 @@
       height:100%;
       overflow:hidden;
     }
-
-    /* Google map：底层 */
-    #map{
-  position:fixed;
-  inset:0;
-  width:100vw;
-  height:100vh;
-  z-index:0;
-}
-
 
     /* p5 canvas：透明叠加 */
     canvas{
@@ -44,9 +34,6 @@
 
     /* HUD */
     #hud{
-      position:fixed;
-      top:12px;
-      left:12px;
       z-index:10;
     }
 
@@ -57,67 +44,44 @@
   </style>
 </head>
 
-<body>
+<body class="scene-cover">
 
-  <!-- Google Map 容器 -->
-  <div id="map"></div>
+  <div id="coverScene" class="scene-layer">
+    <div id="lobbyOverlay" class="overlay">
+      <div class="panel">
+        <div class="title">Cat, Mice</div>
+        <div class="sub">
+          Sit first, then start. 3-4 players only: 1 cat + 2-3 mice.
+        </div>
 
-  <!-- HUD -->
-  <div id="hud">
-    <div class="row">
-      <span class="pill" id="status">Status: Waiting for GPS</span>
-      <span class="pill" id="acc">Accuracy: —</span>
-      <span class="pill" id="coord">lat/lng: —</span>
-      <span class="pill" id="meters">dx/dy: —</span>
-      <button id="startgps">Restart GPS</button>
-      <button id="recenter">Recenter</button>
-    </div>
-  </div>
+        <div class="stage">
+          <div class="table-title">Seats (Seat 1 host-only)</div>
+          <div id="seats" class="seats"></div>
+          <div id="roomLine" class="room-line"></div>
+          <div id="statusText" class="room-line"></div>
+          <div id="errorText" class="error"></div>
 
-  <!-- Lobby -->
-  <div id="lobbyOverlay" class="overlay">
-    <div class="panel">
-      <div class="title">Cat, Mice</div>
-      <div class="sub">
-        Sit first, then start. 6 seats. 1 cat, others mice.
-      </div>
-
-      <div class="stage">
-        <div class="table-title">Seats (Seat 1 host-only)</div>
-        <div id="seats" class="seats"></div>
-        <div id="roomLine" class="room-line"></div>
-        <div id="statusText" class="room-line"></div>
-        <div id="errorText" class="error"></div>
-
-        <div class="start-wrap">
-          <button id="hostBtn" class="secondary">Become Host</button>
-          <button id="startBtn" class="warn">Start game (host only)</button>
+          <div class="start-wrap">
+            <button id="hostBtn" class="secondary">Become Host</button>
+            <button id="startBtn" class="warn">Start game (host only)</button>
+          </div>
         </div>
       </div>
     </div>
   </div>
 
-  <!-- Google Maps 初始化 -->
-  <script>
-    let map;
+  <div id="gameScene" class="scene-layer">
+    <div id="hud">
+      <div class="timer-line" id="timer">--:--</div>
+    </div>
+  </div>
 
-    function initGoogleMap(){
-      map = new google.maps.Map(document.getElementById("map"), {
-        center: { lat: 51.5074, lng: -0.1278 }, // London 默认
-        zoom: 18,
-        mapTypeControl:false,
-        streetViewControl:false,
-        fullscreenControl:false
-      });
 
-      window.__gmLoaded = true;
-    }
-  </script>
+  <!-- game map painter -->
+  <script src="map.js"></script>
 
-  <!-- 重点：这里填入你的真实 KEY -->
-  <script async defer
-    src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDgxuwSEW4frCof1TgO9qwLD5QV1ZDInkk&callback=initGoogleMap">
-  </script>
+  <!-- player controller -->
+  <script src="player.js"></script>
 
   <!-- p5 sketch -->
   <script src="sketch.js"></script>

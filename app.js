@@ -1,24 +1,50 @@
+import fs from "fs";
+import path from "path";
 import express from "express";
 import http from "http";
 import { Server } from "socket.io";
+import { fileURLToPath } from "url";
+
+function loadLocalEnv() {
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const envPath = path.join(__dirname, ".env");
+  if (!fs.existsSync(envPath)) return;
+
+  const lines = fs.readFileSync(envPath, "utf8").split(/\r?\n/);
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const i = line.indexOf("=");
+    if (i < 1) continue;
+    const key = line.slice(0, i).trim();
+    const value = line.slice(i + 1).trim();
+    if (!process.env[key]) process.env[key] = value;
+  }
+}
+
+loadLocalEnv();
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
 const PORT = Number(process.env.PORT) || 3000;
-const HOST = process.env.HOST || "0.0.0.0";
+const HOST = process.env.HOST || "127.0.0.1";
+
+app.get("/favicon.ico", (req, res) => {
+  res.status(204).end();
+});
 
 app.use(express.static("public"));
 
 const MAX_SEATS = 6;
 const MIN_PLAYERS = 3;
-const MAX_PLAYERS = 6;
+const MAX_PLAYERS = 4;
 const DEFAULT_ROOM_ID = "LOBBY";
 
 const CATCH_DIST = 0.06;
 const CATCH_HOLD_MS = 1200;
-const ROUND_MS = 10 * 60 * 1000;
+const ROUND_MS = 5 * 60 * 1000;
 
 const players = {};
 const rooms = {};
@@ -67,8 +93,7 @@ function roomPublicState(room) {
         empty: false,
         socketId: sid,
         name: p.name,
-        role: p.role,
-        gpsReady: Boolean(p.gps)
+        role: p.role
       };
     })
   };
@@ -150,8 +175,8 @@ function startGame(room, bySocketId) {
   }
 
   const seated = roomPlayerIds(room);
-  if (seated.length < 1) {
-    return { ok: false, message: "Need at least 1 seated player before start." };
+  if (seated.length < 3 || seated.length > 4) {
+    return { ok: false, message: "Need 3-4 seated players (1 cat + 2-3 mice)." };
   }
 
   const catIndex = Math.floor(Math.random() * seated.length);
@@ -164,8 +189,9 @@ function startGame(room, bySocketId) {
     players[sid].x = Math.random();
     players[sid].y = Math.random();
     players[sid].last = Date.now();
-    players[sid].role = sid === catId ? "cat" : "mouse";
+    players[sid].role = "mouse";
   });
+  if (players[catId]) players[catId].role = "cat";
 
   room.phase = "running";
   room.startedAt = Date.now();
@@ -245,8 +271,7 @@ io.on("connection", (socket) => {
     x: Math.random(),
     y: Math.random(),
     last: Date.now(),
-    caught: false,
-    gps: null
+    caught: false
   };
 
   const defaultRoom = getOrCreateDefaultRoom();
@@ -375,28 +400,14 @@ io.on("connection", (socket) => {
     if (!p?.roomId) return;
     if (typeof x !== "number" || typeof y !== "number") return;
 
-    p.x = clamp01(x);
-    p.y = clamp01(y);
-    p.last = Date.now();
-  });
-
-  socket.on("gps", ({ lat, lon, accuracy, ts }) => {
-    const p = players[socket.id];
-    if (!p) return;
-
-    if (typeof lat !== "number" || typeof lon !== "number" || !Number.isFinite(lat) || !Number.isFinite(lon)) {
+    const room = getRoom(p.roomId);
+    if (room?.phase === "running" && p.role === "mouse" && p.caught) {
       return;
     }
 
-    p.gps = {
-      lat: Math.max(-90, Math.min(90, lat)),
-      lon: Math.max(-180, Math.min(180, lon)),
-      accuracy: typeof accuracy === "number" && Number.isFinite(accuracy) ? Math.max(0, accuracy) : null,
-      ts: typeof ts === "number" && Number.isFinite(ts) ? ts : Date.now()
-    };
+    p.x = clamp01(x);
+    p.y = clamp01(y);
     p.last = Date.now();
-
-    if (p.roomId) emitRoom(p.roomId);
   });
 
   socket.on("disconnect", () => {
